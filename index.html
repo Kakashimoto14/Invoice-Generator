@@ -58,12 +58,28 @@
         import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, addDoc, updateDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Initialize Firebase
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        // ==========================================
+        // LOCAL DEVELOPMENT FIX:
+        // If running locally, paste your free Firebase project keys here.
+        // ==========================================
+        const localFirebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase (Safely falls back to local keys if running outside of Canvas)
+        const isLocalConfigSet = localFirebaseConfig.apiKey !== "YOUR_API_KEY";
+        const envConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const firebaseConfig = envConfig || (isLocalConfigSet ? localFirebaseConfig : null);
+
         const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
         const auth = app ? getAuth(app) : null;
         const db = app ? getFirestore(app) : null;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'invoice-gen-app';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'invoice-gen-local';
 
         // --- SVG Icons ---
         const PlusIcon = () => <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>;
@@ -97,6 +113,7 @@
             const [currentDocId, setCurrentDocId] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
             const [showHistory, setShowHistory] = useState(false);
+            const [saveError, setSaveError] = useState(''); // New state for error handling
 
             const [data, setData] = useState(defaultData);
             const [items, setItems] = useState(defaultItems);
@@ -128,7 +145,7 @@
                 // Rule 1: Strict Paths
                 const invoicesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'invoices');
                 
-                // Rule 2 & 3: Listen to data safely, no complex queries
+                // Listen to data safely, no complex queries
                 const unsubscribe = onSnapshot(invoicesRef, (snapshot) => {
                     const fetched = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                     // Sort in memory (newest first)
@@ -140,7 +157,6 @@
 
                 return () => unsubscribe();
             }, [user]);
-
 
             // --- Calculations ---
             const { subtotal, tax, total } = useMemo(() => {
@@ -196,7 +212,7 @@
             };
 
             const deleteInvoice = async (docId, e) => {
-                e.stopPropagation(); // Prevent loading the invoice when clicking delete
+                e.stopPropagation();
                 if (!user || !db) return;
                 try {
                     await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', docId));
@@ -209,8 +225,10 @@
             };
 
             const saveInvoice = async () => {
+                // Check if Firebase is properly initialized
                 if (!user || !db) {
-                    console.warn("Database not connected. Running in local preview only.");
+                    setSaveError("Cloud DB disconnected. Paste your Firebase config into the code to save locally.");
+                    setTimeout(() => setSaveError(''), 5000);
                     return;
                 }
                 
@@ -235,6 +253,8 @@
                     }
                 } catch (err) {
                     console.error("Error saving document:", err);
+                    setSaveError("Error saving to database. Check your connection.");
+                    setTimeout(() => setSaveError(''), 5000);
                 }
                 
                 // Fake delay for UX
@@ -251,7 +271,7 @@
                             <h1 className="text-xl font-semibold hidden md:block">Pro Invoice</h1>
                             {isSaving && <span className="ml-4 text-xs bg-slate-800 text-indigo-300 px-2 py-1 rounded animate-pulse">Saving to Cloud...</span>}
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 relative">
                             <button onClick={createNewInvoice} className="text-sm font-medium hover:text-indigo-300 transition-colors hidden sm:block">
                                 + New Blank Invoice
                             </button>
@@ -268,6 +288,13 @@
                             >
                                 <SaveIcon /> {currentDocId ? 'Update' : 'Save'}
                             </button>
+
+                            {/* Error Tooltip that shows when saving fails locally */}
+                            {saveError && (
+                                <div className="absolute top-12 right-0 bg-red-100 border border-red-200 text-red-600 px-3 py-2 rounded-lg text-xs font-bold shadow-lg whitespace-nowrap animate-in fade-in slide-in-from-top-2">
+                                    {saveError}
+                                </div>
+                            )}
                         </div>
                     </div>
 
