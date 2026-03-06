@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pro Invoice Generator</title>
+    
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* Custom Scrollbar for a polished look */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Print-specific styles: This is the magic that creates the PDF */
+        @media print {
+            @page {
+                margin: 0; /* Removes default browser headers/footers */
+                size: letter portrait;
+            }
+            body {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+                background-color: white;
+                height: auto !important;
+                overflow: visible !important;
+            }
+            /* Hide the editor panel and any buttons when printing */
+            .no-print {
+                display: none !important;
+            }
+            /* Reset layout grids for print */
+            .main-layout {
+                display: block !important;
+                height: auto !important;
+            }
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans antialiased h-screen overflow-hidden flex flex-col">
+    <div id="root" class="h-full w-full flex flex-col"></div>
+
+    <script type="text/babel" data-type="module">
+        const { useState, useEffect, useMemo } = React;
+        
+        // --- Firebase Integration ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, onSnapshot, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Initialize Firebase
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
+        const auth = app ? getAuth(app) : null;
+        const db = app ? getFirestore(app) : null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'invoice-gen-app';
+
+        // --- SVG Icons ---
+        const PlusIcon = () => <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>;
+        const TrashIcon = () => <svg className="w-5 h-5 text-red-500 hover:text-red-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>;
+        const DownloadIcon = () => <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>;
+        const SaveIcon = () => <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>;
+        const HistoryIcon = () => <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>;
+        const CloseIcon = () => <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>;
+
+        const defaultData = {
+            companyName: 'Tech Solutions PH',
+            companyAddress: '123 Ayala Avenue\nMakati City, Metro Manila 1226',
+            clientName: 'Juan Dela Cruz',
+            clientAddress: '456 Taft Avenue\nManila, Metro Manila 1000',
+            invoiceNumber: 'INV-' + Math.floor(Math.random() * 100000),
+            date: new Date().toISOString().split('T')[0],
+            dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+            taxRate: 12,
+            notes: 'Thank you for your business. Payment is due within 14 days.'
+        };
+
+        const defaultItems = [
+            { id: 1, desc: 'Web Application Development', qty: 1, price: 125000 },
+            { id: 2, desc: 'UI/UX Design Concept', qty: 1, price: 45000 }
+        ];
+
+        function App() {
+            // --- State Management ---
+            const [user, setUser] = useState(null);
+            const [savedInvoices, setSavedInvoices] = useState([]);
+            const [currentDocId, setCurrentDocId] = useState(null);
+            const [isSaving, setIsSaving] = useState(false);
+            const [showHistory, setShowHistory] = useState(false);
+
+            const [data, setData] = useState(defaultData);
+            const [items, setItems] = useState(defaultItems);
+
+            // --- Firebase Auth & DB Setup ---
+            useEffect(() => {
+                if (!auth) return;
+                
+                const initAuth = async () => {
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        console.error("Auth error:", error);
+                    }
+                };
+                initAuth();
+
+                const unsubscribe = onAuthStateChanged(auth, setUser);
+                return () => unsubscribe();
+            }, []);
+
+            useEffect(() => {
+                if (!user || !db) return;
+                
+                // Rule 1: Strict Paths
+                const invoicesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'invoices');
+                
+                // Rule 2 & 3: Listen to data safely, no complex queries
+                const unsubscribe = onSnapshot(invoicesRef, (snapshot) => {
+                    const fetched = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    // Sort in memory (newest first)
+                    fetched.sort((a, b) => b.updatedAt - a.updatedAt);
+                    setSavedInvoices(fetched);
+                }, (error) => {
+                    console.error("Firestore listening error:", error);
+                });
+
+                return () => unsubscribe();
+            }, [user]);
+
+
+            // --- Calculations ---
+            const { subtotal, tax, total } = useMemo(() => {
+                const sub = items.reduce((acc, item) => acc + ((Number(item.qty) || 0) * (Number(item.price) || 0)), 0);
+                const calcTax = sub * ((Number(data.taxRate) || 0) / 100);
+                return {
+                    subtotal: sub,
+                    tax: calcTax,
+                    total: sub + calcTax
+                };
+            }, [items, data.taxRate]);
+
+            const formatCurrency = (amount) => {
+                return new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(amount);
+            };
+
+            // --- Handlers ---
+            const handleDataChange = (e) => {
+                const { name, value } = e.target;
+                setData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleItemChange = (id, field, value) => {
+                setItems(prev => prev.map(item => {
+                    if (item.id === id) {
+                        const val = (field === 'qty' || field === 'price') ? (value === '' ? '' : Number(value)) : value;
+                        return { ...item, [field]: val };
+                    }
+                    return item;
+                }));
+            };
+
+            const addItem = () => setItems(prev => [...prev, { id: Date.now(), desc: '', qty: 1, price: 0 }]);
+            const removeItem = (id) => setItems(prev => prev.filter(item => item.id !== id));
+            const triggerPrint = () => window.print();
+
+            // --- Database Actions ---
+            const createNewInvoice = () => {
+                setCurrentDocId(null);
+                setData({
+                    ...defaultData,
+                    invoiceNumber: 'INV-' + Math.floor(Math.random() * 100000)
+                });
+                setItems([{ id: Date.now(), desc: '', qty: 1, price: 0 }]);
+                setShowHistory(false);
+            };
+
+            const loadInvoice = (invoiceDoc) => {
+                setCurrentDocId(invoiceDoc.id);
+                setData(invoiceDoc.data);
+                setItems(invoiceDoc.items);
+                setShowHistory(false);
+            };
+
+            const deleteInvoice = async (docId, e) => {
+                e.stopPropagation(); // Prevent loading the invoice when clicking delete
+                if (!user || !db) return;
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', docId));
+                    if (currentDocId === docId) {
+                        createNewInvoice();
+                    }
+                } catch (err) {
+                    console.error("Error deleting document:", err);
+                }
+            };
+
+            const saveInvoice = async () => {
+                if (!user || !db) {
+                    console.warn("Database not connected. Running in local preview only.");
+                    return;
+                }
+                
+                setIsSaving(true);
+                try {
+                    const invoicesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'invoices');
+                    const payload = {
+                        data,
+                        items,
+                        total,
+                        updatedAt: Date.now()
+                    };
+
+                    if (currentDocId) {
+                        // Update existing
+                        await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'invoices', currentDocId), payload);
+                    } else {
+                        // Create new
+                        payload.createdAt = Date.now();
+                        const newDoc = await addDoc(invoicesRef, payload);
+                        setCurrentDocId(newDoc.id);
+                    }
+                } catch (err) {
+                    console.error("Error saving document:", err);
+                }
+                
+                // Fake delay for UX
+                setTimeout(() => setIsSaving(false), 600);
+            };
+
+            return (
+                <div className="flex flex-col h-full bg-slate-100">
+                    
+                    {/* TOP NAVIGATION BAR */}
+                    <div className="h-16 bg-slate-900 text-white flex items-center justify-between px-6 shadow-md no-print z-30 shrink-0">
+                        <div className="flex items-center gap-2">
+                            <div className="w-8 h-8 bg-indigo-500 rounded flex items-center justify-center font-bold text-lg">P</div>
+                            <h1 className="text-xl font-semibold hidden md:block">Pro Invoice</h1>
+                            {isSaving && <span className="ml-4 text-xs bg-slate-800 text-indigo-300 px-2 py-1 rounded animate-pulse">Saving to Cloud...</span>}
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <button onClick={createNewInvoice} className="text-sm font-medium hover:text-indigo-300 transition-colors hidden sm:block">
+                                + New Blank Invoice
+                            </button>
+                            <button 
+                                onClick={() => setShowHistory(true)}
+                                className="flex items-center bg-slate-800 hover:bg-slate-700 text-white px-3 py-1.5 rounded text-sm font-medium transition-colors border border-slate-700"
+                            >
+                                <HistoryIcon /> History ({savedInvoices.length})
+                            </button>
+                            <button 
+                                onClick={saveInvoice}
+                                disabled={isSaving}
+                                className={`flex items-center px-4 py-1.5 rounded text-sm font-medium transition-colors shadow-sm ${isSaving ? 'bg-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500'}`}
+                            >
+                                <SaveIcon /> {currentDocId ? 'Update' : 'Save'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* HISTORY MODAL OVERLAY */}
+                    {showHistory && (
+                        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex justify-center items-start pt-20 no-print">
+                            <div className="bg-white w-full max-w-2xl rounded-xl shadow-2xl flex flex-col max-h-[70vh] animate-in fade-in slide-in-from-top-4 duration-200">
+                                <div className="flex justify-between items-center p-5 border-b border-slate-100">
+                                    <h2 className="text-xl font-bold text-slate-800">Your Saved Invoices</h2>
+                                    <button onClick={() => setShowHistory(false)} className="text-slate-400 hover:text-slate-700 transition-colors">
+                                        <CloseIcon />
+                                    </button>
+                                </div>
+                                <div className="overflow-y-auto p-2 flex-1">
+                                    {savedInvoices.length === 0 ? (
+                                        <div className="p-8 text-center text-slate-500">
+                                            No invoices saved yet. Create and save one!
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-1">
+                                            {savedInvoices.map(inv => (
+                                                <div 
+                                                    key={inv.id} 
+                                                    onClick={() => loadInvoice(inv)}
+                                                    className={`p-4 rounded-lg flex justify-between items-center cursor-pointer transition-colors ${currentDocId === inv.id ? 'bg-indigo-50 border border-indigo-100' : 'hover:bg-slate-50 border border-transparent'}`}
+                                                >
+                                                    <div>
+                                                        <div className="font-semibold text-slate-800">{inv.data.clientName}</div>
+                                                        <div className="text-xs text-slate-500 flex gap-2 mt-1">
+                                                            <span className="bg-slate-200 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold text-slate-600">{inv.data.invoiceNumber}</span>
+                                                            <span>Last updated: {new Date(inv.updatedAt).toLocaleDateString()}</span>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="font-bold text-slate-800">{formatCurrency(inv.total)}</div>
+                                                        <button 
+                                                            onClick={(e) => deleteInvoice(inv.id, e)}
+                                                            className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                                            title="Delete Invoice"
+                                                        >
+                                                            <TrashIcon />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MAIN APPLICATION WORKSPACE */}
+                    <div className="flex flex-col lg:flex-row flex-1 overflow-hidden main-layout">
+                        
+                        {/* LEFT PANEL: The Editor Form */}
+                        <div className="w-full lg:w-5/12 lg:h-full bg-white border-b lg:border-b-0 lg:border-r border-slate-200 shadow-sm flex flex-col no-print z-10 relative">
+                            <div className="p-4 md:p-6 border-b border-slate-200 bg-slate-50 flex justify-between items-center sticky top-0 z-20">
+                                <div>
+                                    <h2 className="text-lg md:text-xl font-bold text-slate-800">Edit Details</h2>
+                                    <p className="text-xs md:text-sm text-slate-500">
+                                        <span className="lg:hidden">Live preview below</span>
+                                        <span className="hidden lg:inline">Live preview on the right</span>
+                                    </p>
+                                </div>
+                                <button 
+                                    onClick={triggerPrint}
+                                    className="flex items-center bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 px-3 py-2 md:px-4 rounded-lg text-sm md:text-base font-medium transition-colors shadow-sm"
+                                >
+                                    <DownloadIcon /> Export PDF
+                                </button>
+                            </div>
+
+                            <div className="flex-1 lg:overflow-y-auto p-4 md:p-6 space-y-8">
+                                
+                                {/* Company & Client Details */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div className="space-y-4">
+                                        <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Bill From</h3>
+                                        <div>
+                                            <label className="block text-xs text-slate-500 mb-1">Company Name</label>
+                                            <input type="text" name="companyName" value={data.companyName} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-slate-500 mb-1">Company Address</label>
+                                            <textarea name="companyAddress" value={data.companyAddress} onChange={handleDataChange} rows="3" className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-sm resize-none"></textarea>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider">Bill To</h3>
+                                        <div>
+                                            <label className="block text-xs text-slate-500 mb-1">Client Name</label>
+                                            <input type="text" name="clientName" value={data.clientName} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-slate-500 mb-1">Client Address</label>
+                                            <textarea name="clientAddress" value={data.clientAddress} onChange={handleDataChange} rows="3" className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all text-sm resize-none"></textarea>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <hr className="border-slate-100" />
+
+                                {/* Invoice Meta */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <label className="block text-xs text-slate-500 mb-1">Invoice Number</label>
+                                        <input type="text" name="invoiceNumber" value={data.invoiceNumber} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 text-sm outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-slate-500 mb-1">Date</label>
+                                        <input type="date" name="date" value={data.date} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 text-sm outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-slate-500 mb-1">Due Date</label>
+                                        <input type="date" name="dueDate" value={data.dueDate} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 text-sm outline-none" />
+                                    </div>
+                                </div>
+
+                                <hr className="border-slate-100" />
+
+                                {/* Line Items */}
+                                <div className="space-y-4">
+                                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex justify-between items-center">
+                                        Line Items
+                                    </h3>
+                                    
+                                    {items.map((item, index) => (
+                                        <div key={item.id} className="flex gap-2 items-start bg-slate-50 p-3 rounded-lg border border-slate-200">
+                                            <div className="flex-1 space-y-2">
+                                                <input 
+                                                    type="text" 
+                                                    placeholder="Item description" 
+                                                    value={item.desc} 
+                                                    onChange={(e) => handleItemChange(item.id, 'desc', e.target.value)}
+                                                    className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 text-sm outline-none bg-white" 
+                                                />
+                                                <div className="flex gap-2">
+                                                    <div className="w-1/3">
+                                                        <label className="block text-[10px] text-slate-500 uppercase mb-1">Qty</label>
+                                                        <input type="number" min="1" value={item.qty} onChange={(e) => handleItemChange(item.id, 'qty', e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm outline-none bg-white" />
+                                                    </div>
+                                                    <div className="w-2/3">
+                                                        <label className="block text-[10px] text-slate-500 uppercase mb-1">Price</label>
+                                                        <input type="number" min="0" step="0.01" value={item.price} onChange={(e) => handleItemChange(item.id, 'price', e.target.value)} className="w-full p-2 border border-slate-300 rounded text-sm outline-none bg-white" />
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <button onClick={() => removeItem(item.id)} className="p-2 mt-1 hover:bg-slate-200 rounded-md transition-colors" title="Remove Item">
+                                                <TrashIcon />
+                                            </button>
+                                        </div>
+                                    ))}
+
+                                    <button onClick={addItem} className="w-full py-2 border-2 border-dashed border-slate-300 text-slate-500 rounded-lg hover:border-indigo-400 hover:text-indigo-600 transition-colors flex items-center justify-center font-medium text-sm">
+                                        <PlusIcon /> Add New Item
+                                    </button>
+                                </div>
+
+                                <hr className="border-slate-100" />
+
+                                {/* Taxes and Notes */}
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <label className="block text-xs text-slate-500 mb-1">Tax Rate (%)</label>
+                                        <input type="number" min="0" step="0.1" name="taxRate" value={data.taxRate} onChange={handleDataChange} className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 text-sm outline-none" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-slate-500 mb-1">Notes / Terms</label>
+                                    <textarea name="notes" value={data.notes} onChange={handleDataChange} rows="3" className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm resize-none"></textarea>
+                                </div>
+
+                            </div>
+                        </div>
+
+                        {/* RIGHT PANEL: The Live Preview (This becomes the actual PDF) */}
+                        <div className="w-full lg:w-7/12 lg:h-full bg-slate-200 overflow-x-auto lg:overflow-y-auto p-4 md:p-8 flex justify-start lg:justify-center print:block print:p-0 print:bg-white print:overflow-visible relative">
+                            {/* Watermark/Status Indicator */}
+                            {currentDocId && (
+                                <div className="absolute top-4 right-8 bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold no-print shadow-sm z-10 flex items-center gap-2">
+                                    <div className="w-2 h-2 bg-green-500 rounded-full"></div> Cloud Synced
+                                </div>
+                            )}
+
+                            {/* The A4/Letter Sized Document Container */}
+                            <div className="bg-white shadow-xl rounded-lg w-[850px] min-w-[850px] min-h-[1056px] p-10 md:p-14 flex flex-col relative print:shadow-none print:min-w-0 print:w-full print:rounded-none">
+                                
+                                {/* Invoice Header */}
+                                <div className="flex justify-between items-start border-b-2 border-slate-800 pb-8 mb-8">
+                                    <div>
+                                        <h2 className="text-3xl font-black text-slate-900 tracking-tight">{data.companyName || 'Your Company'}</h2>
+                                        <div className="text-slate-500 text-sm mt-2 whitespace-pre-wrap leading-relaxed">
+                                            {data.companyAddress}
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <h1 className="text-4xl font-light text-slate-400 tracking-widest uppercase mb-2">Invoice</h1>
+                                        <p className="text-slate-800 font-semibold">{data.invoiceNumber}</p>
+                                    </div>
+                                </div>
+
+                                {/* Bill To & Meta Info */}
+                                <div className="flex justify-between items-start mb-12">
+                                    <div>
+                                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Billed To</p>
+                                        <p className="text-lg font-bold text-slate-800">{data.clientName || 'Client Name'}</p>
+                                        <div className="text-slate-500 text-sm mt-1 whitespace-pre-wrap leading-relaxed">
+                                            {data.clientAddress}
+                                        </div>
+                                    </div>
+                                    <div className="text-right grid grid-cols-2 gap-x-8 gap-y-2">
+                                        <p className="text-sm text-slate-500">Date Issued:</p>
+                                        <p className="text-sm font-semibold text-slate-800">{new Date(data.date).toLocaleDateString() || '-'}</p>
+                                        
+                                        <p className="text-sm text-slate-500">Due Date:</p>
+                                        <p className="text-sm font-semibold text-slate-800">{new Date(data.dueDate).toLocaleDateString() || '-'}</p>
+                                    </div>
+                                </div>
+
+                                {/* Items Table */}
+                                <div className="flex-1">
+                                    <table className="w-full text-left border-collapse">
+                                        <thead>
+                                            <tr className="border-b-2 border-slate-200">
+                                                <th className="py-3 text-xs font-bold text-slate-400 uppercase tracking-wider">Description</th>
+                                                <th className="py-3 text-xs font-bold text-slate-400 uppercase tracking-wider text-center">Qty</th>
+                                                <th className="py-3 text-xs font-bold text-slate-400 uppercase tracking-wider text-right">Price</th>
+                                                <th className="py-3 text-xs font-bold text-slate-400 uppercase tracking-wider text-right">Amount</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="text-sm">
+                                            {items.map((item) => (
+                                                <tr key={item.id} className="border-b border-slate-100">
+                                                    <td className="py-4 text-slate-800 pr-4">{item.desc || 'Item Description'}</td>
+                                                    <td className="py-4 text-slate-600 text-center">{item.qty}</td>
+                                                    <td className="py-4 text-slate-600 text-right">{formatCurrency(item.price)}</td>
+                                                    <td className="py-4 text-slate-800 font-medium text-right">{formatCurrency(item.qty * item.price)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Totals Calculation */}
+                                <div className="flex justify-end mt-8 mb-12">
+                                    <div className="w-full md:w-1/2 lg:w-2/5 space-y-3">
+                                        <div className="flex justify-between text-sm text-slate-600">
+                                            <span>Subtotal</span>
+                                            <span>{formatCurrency(subtotal)}</span>
+                                        </div>
+                                        <div className="flex justify-between text-sm text-slate-600">
+                                            <span>Tax ({data.taxRate}%)</span>
+                                            <span>{formatCurrency(tax)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center border-t-2 border-slate-800 pt-3 mt-3">
+                                            <span className="text-lg font-bold text-slate-800">Total Due</span>
+                                            <span className="text-xl font-black text-indigo-600">{formatCurrency(total)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Footer / Notes */}
+                                <div className="mt-auto pt-8 border-t border-slate-200">
+                                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">Notes</p>
+                                    <p className="text-sm text-slate-500 whitespace-pre-wrap leading-relaxed">{data.notes}</p>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
